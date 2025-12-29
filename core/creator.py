@@ -50,7 +50,7 @@ class LandscapeCreator:
           }}
         ]
         
-        Find 5-10 major players in this market. Use Google Search to find current, real companies.
+        Find 10-20 major players in this market. Use Google Search to find current, real companies.
         """
         
         try:

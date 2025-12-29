@@ -58,7 +58,6 @@ class LLMEngine:
         """
         logging.info("Initiating Google Search grounding...")
         
-        # --- THE FIX IS HERE ---
         # Changed 'google_search_retrieval' to 'google_search'
         search_tool = types.Tool(
             google_search=types.GoogleSearch()
