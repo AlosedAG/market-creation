@@ -101,4 +101,5 @@ class LLMEngine:
                 return [json.loads(json_obj_match.group(0))]
         except Exception as e:
             logging.error(f"JSON Parsing failed: {e}")
+
         return []
