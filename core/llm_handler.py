@@ -58,7 +58,6 @@ class LLMEngine:
         """
         logging.info("Initiating Google Search grounding...")
         
-        # --- THE FIX IS HERE ---
         # Changed 'google_search_retrieval' to 'google_search'
         search_tool = types.Tool(
             google_search=types.GoogleSearch()
@@ -102,4 +101,5 @@ class LLMEngine:
                 return [json.loads(json_obj_match.group(0))]
         except Exception as e:
             logging.error(f"JSON Parsing failed: {e}")
+
         return []
