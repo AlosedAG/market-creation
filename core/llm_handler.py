@@ -1,123 +1,105 @@
 import json
+import time
+import logging
+import re
+from typing import List, Dict, Any
 from google.genai import types
-from typing import List
+from core.config import rate_limit
 
 class LLMEngine:
     def __init__(self, client, model_name: str):
-        """
-        Initialize LLM Engine with the new Google GenAI SDK.
-        
-        Args:
-            client: The genai.Client instance
-            model_name: The model name to use (e.g., 'gemini-1.5-flash')
-        """
         self.client = client
         self.model_name = model_name
 
-    def analyze_market(self, topic: str) -> dict:
+    def _safe_generate(self, prompt: str, config: types.GenerateContentConfig):
         """
-        Analyze a market topic and return taxonomy structure.
+        Infinite Patience logic: waits for quota resets and handles server busy errors.
+        """
+        max_attempts = 15 
         
-        Args:
-            topic: The market topic to analyze
+        for attempt in range(1, max_attempts + 1):
+            try:
+                rate_limit()
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config
+                )
+                return response
             
-        Returns:
-            Dictionary with market structure
-        """
-        prompt = f"""
-        Analyze the market for: {topic}.
-        Return a JSON object with exactly these keys:
-        - "market_name": A formal name (e.g., 'Conversational Intelligence').
-        - "definition": A brief description.
-        - "divisions": List of 4-6 channels (e.g., SMS, Voice).
-        - "suggested_features": List of 8-10 features to check (e.g., SSO, API).
-        - "sub_divisions": List of 3-5 niche segments.
-        """
-        
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
-        )
-        
-        return json.loads(response.text)
+            except Exception as e:
+                err_msg = str(e).upper()
+                
+                # Handle Quota (429) or Server Overload (503)
+                if any(x in err_msg for x in ["429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "OVERLOADED"]):
+                    wait_time = 65 
+                    logging.warning(f"\n[!] Limit hit. Waiting {wait_time}s for reset... (Attempt {attempt}/{max_attempts})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # If it's a 400 or other fatal error, raise it immediately
+                    raise e
+                    
+        raise Exception("Max patience reached. Please try again later.")
 
-    def extract_product_data(self, raw_text: str, features_to_check: List[str]) -> dict:
-        """
-        Extract structured product data from website text.
-        
-        Args:
-            raw_text: Raw website content
-            features_to_check: List of features to verify
-            
-        Returns:
-            Dictionary with extracted product information
-        """
-        prompt = f"""
-        Analyze this website text and extract product info.
-        Features to check (return true/false for each): {features_to_check}
-        
-        Website Content:
-        {raw_text[:15000]}
-        
-        Return a JSON object matching this structure:
-        {{
-            "company_name": "string",
-            "product_name": "string",
-            "description": "string",
-            "features": ["list of strings"],
-            "feature_flags": {{"Feature Name": true/false}},
-            "case_study_desc": "string",
-            "case_study_link": "string",
-            "is_case_study_present": true/false,
-            "pricing_desc": "string",
-            "pricing_tiers": ["list of strings"],
-            "notes": "string"
-        }}
-        """
-        
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
+    def analyze_market(self, topic: str) -> dict:
+        prompt = f"Analyze the market for: {topic}. Return JSON with: market_name, definition, divisions, suggested_features, sub_divisions."
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            tools=[], 
+            temperature=0.2
         )
-        
+        response = self._safe_generate(prompt, config)
         return json.loads(response.text)
 
     def search_and_analyze(self, query: str) -> list:
         """
-        Use Gemini's built-in Google Search grounding to find and analyze information.
-        
-        NOTE: Google Search grounding is available in specific Gemini models.
-        Check model capabilities before using this feature.
-        
-        Args:
-            query: Search query to analyze
-            
-        Returns:
-            List of structured results
+        Uses the corrected Google Search tool (google_search).
         """
+        logging.info("Initiating Google Search grounding...")
+        
+        # --- THE FIX IS HERE ---
+        # Changed 'google_search_retrieval' to 'google_search'
+        search_tool = types.Tool(
+            google_search=types.GoogleSearch()
+        )
+
+        config = types.GenerateContentConfig(
+            tools=[search_tool],
+            temperature=0.0 
+        )
+
         try:
-            # Enable Google Search grounding
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=query,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    # Note: Google Search grounding might require specific model versions or may not be available in all regions
-                )
-            )
-            
-            return json.loads(response.text)
+            response = self._safe_generate(query, config)
+            if response and response.text:
+                return self._parse_json_from_text(response.text)
+            return []
         except Exception as e:
-            # If search grounding isn't available, provide helpful error
-            if 'grounding' in str(e).lower() or 'search' in str(e).lower():
-                raise Exception(
-                    "Google Search grounding not available for this model. "
-                    "Try using Gemini 2.0 Flash Exp or later models."
-                )
-            raise
+            logging.error(f"Search failed: {e}")
+            return []
+
+    def extract_product_data(self, raw_text: str, features_to_check: List[str]) -> dict:
+        prompt = f"Analyze: {raw_text[:8000]}. Check features: {features_to_check}."
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            tools=[],
+            temperature=0.1
+        )
+        response = self._safe_generate(prompt, config)
+        return json.loads(response.text)
+
+    def _parse_json_from_text(self, text_content: str) -> list:
+        """Extracts JSON array even if the model provides conversational context."""
+        try:
+            # Look for the JSON block [...]
+            json_match = re.search(r'\[\s*\{.*\}\s*\]', text_content, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
+            
+            # Look for single JSON object {...}
+            json_obj_match = re.search(r'\{\s*".*":.*\s*\}', text_content, re.DOTALL)
+            if json_obj_match:
+                return [json.loads(json_obj_match.group(0))]
+        except Exception as e:
+            logging.error(f"JSON Parsing failed: {e}")
+        return []
